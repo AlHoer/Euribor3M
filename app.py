@@ -1,17 +1,16 @@
 import socket
 from urllib.parse import urlparse
+import tempfile
+import shutil
+import re
 
 import streamlit as st
 from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 
-def fetch_html(url: str) -> str:
-    """Retrieve fully rendered HTML from a URL using headless Chrome."""
+def fetch_page(url: str) -> tuple[str, list[str]]:
+    """Retrieve rendered HTML and extract numbers using Playwright."""
 
     parsed = urlparse(url)
     if not (parsed.scheme and parsed.netloc):
@@ -22,27 +21,45 @@ def fetch_html(url: str) -> str:
     except socket.gaierror as e:
         raise RuntimeError(f"Impossible de résoudre l'hôte {parsed.hostname}") from e
 
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument(
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    )
-    driver = webdriver.Chrome(options=options)
-    try:
-        driver.get(url)
-        WebDriverWait(driver, 10).until(
-            lambda d: d.execute_script("return document.readyState") == "complete"
+    profile = tempfile.mkdtemp()
+    numbers = set()
+
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(
+            user_data_dir=profile,
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=EnableRemoteDebugging",
+            ],
         )
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
-        )
-        html = driver.page_source
-    finally:
-        driver.quit()
-    return html
+        page = context.new_page()
+
+        def on_response(resp):
+            if resp.request.resource_type == "fetch" and resp.status == 200:
+                try:
+                    text = resp.text()
+                except Exception:
+                    return
+                for n in re.findall(r"\d+(?:[.,]\d+)?", text):
+                    numbers.add(n.replace(",", "."))
+
+        page.on("response", on_response)
+
+        try:
+            page.goto(url, timeout=300_000, wait_until="domcontentloaded")
+            page.wait_for_timeout(5_000)
+            body = page.evaluate("() => document.body.innerText || ''")
+            for n in re.findall(r"\d+(?:[.,]\d+)?", body):
+                numbers.add(n.replace(",", "."))
+            html = page.content()
+        except PlaywrightTimeoutError:
+            raise RuntimeError("La page n'a pas chargé à temps.")
+        finally:
+            context.close()
+            shutil.rmtree(profile, ignore_errors=True)
+
+    return html, sorted(numbers, key=lambda x: float(x))
 
 
 st.title("WebScrapping App")
@@ -51,7 +68,7 @@ url = st.text_input("Entrez l'URL à scraper:")
 
 if url:
     try:
-        html = fetch_html(url)
+        html, numbers = fetch_page(url)
         soup = BeautifulSoup(html, "html.parser")
         title = soup.title.string if soup.title else "Pas de titre"
         st.header("Titre de la page")
@@ -64,5 +81,9 @@ if url:
                 st.write(p)
         else:
             st.write("Aucun paragraphe trouvé.")
+
+        if numbers:
+            st.header("Nombres détectés")
+            st.write(", ".join(numbers))
     except Exception as e:
         st.error(f"Erreur de chargement : {e}")
