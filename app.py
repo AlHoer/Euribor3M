@@ -28,8 +28,8 @@ def fetch_euribor_3m_bundesbank(start: str, end: str) -> pd.DataFrame:
     return df.set_index('Date')
 
 # Ex. : les 30 derniers jours
-today = date.today()
-start = (today - timedelta(days=30)).isoformat()
+today = date.today() - timedelta(days=30))
+start = (today - timedelta(days=60)).isoformat()
 end = today.isoformat()
 df = fetch_euribor_3m_bundesbank(start, end)
 print(df)
