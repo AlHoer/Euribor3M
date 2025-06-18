@@ -1,73 +1,58 @@
 import streamlit as st
 import pandas as pd
 import requests
-import re
-from io import StringIO
-from datetime import date, timedelta
-from dateutil.relativedelta import relativedelta
+from datetime import date
 
-st.set_page_config(page_title="Euribor 3M — 5 ans Journaliers", layout="wide")
-st.title("Historique journalier du taux Euribor 3 mois (5 ans)")
+st.set_page_config(page_title="Euribor 3M – 24 dernières obs.", layout="centered")
+st.title("Euribor 3 mois (dernières 24 observations)")
 
 @st.cache_data(ttl=3600)
-def fetch_euribor_3m_5y():
-    """
-    Récupère les cotations journalières du 3M Euribor sur 5 ans
-    en reculant la date de fin jusqu'à trouver des données.
-    """
-    # 1. Définir la période de début
-    today = date.today()
-    start = (today - relativedelta(years=5)).isoformat()
+def fetch_last_24():
+    url = (
+        "https://data-api.ecb.europa.eu/service/data/"
+        "FM/M.U2.EUR.RT.MM.EURIBOR3MD_.HSTA"
+        "?lastNObservations=24"
+        "&detail=dataonly"
+        "&format=jsondata"
+    )
+    resp = requests.get(url)
+    resp.raise_for_status()
+    js = resp.json()
 
-    flow_ref   = "BBIG1"
-    series_key = "D.D0.EUR.MMKT.EURIBOR.M03.BID._Z"
-    base_url   = f"https://api.statistiken.bundesbank.de/rest/data/{flow_ref}/{series_key}"
+    # 1) extraire la dimension des dates
+    obs_dim = js["structure"]["dimensions"]["observation"][0]["values"]
+    dates = [d["id"] for d in obs_dim]
 
-    # 2. Tenter plusieurs dates de fin (jusqu'à 7 jours en arrière)
-    resp = None
-    for offset in range(1, 8):
-        end_candidate = (today - timedelta(days=offset)).isoformat()
-        params = {
-            "startPeriod": start,
-            "endPeriod":   end_candidate,
-            "format":      "csv"
-        }
-        r = requests.get(base_url, params=params)
-        r.raise_for_status()
-        if "TIME_PERIOD" in r.text:
-            resp = r
-            break
+    # 2) récupérer la série unique
+    series = js["dataSets"][0]["series"]
+    _, content = next(iter(series.items()))
+    observations = content.get("observations", {})
 
-    if resp is None:
-        raise RuntimeError("Aucune donnée trouvée sur les 7 derniers jours pour définir la date de fin.")
+    # 3) construire la liste de dicts
+    records = []
+    for idx_str, val in observations.items():
+        idx = int(idx_str)
+        records.append({
+            "Date": dates[idx],
+            "Euribor 3M (%)": val[0]
+        })
 
-    # 3. Nettoyer le préambule SDMX-CSV
-    lines = resp.text.splitlines()
-    header_idx = next(i for i, L in enumerate(lines) if "TIME_PERIOD" in L)
-    data = "\n".join(lines[header_idx:])
+    # 4) DataFrame final
+    df = pd.DataFrame(records)
+    df["Date"] = pd.to_datetime(df["Date"])
+    return df.set_index("Date").sort_index()
 
-    # 4. Détecter le séparateur et charger dans pandas
-    sep = "," if data.count(",") > data.count(";") else ";"
-    df = pd.read_csv(StringIO(data), sep=sep)
-    df = df.rename(columns={
-        "TIME_PERIOD": "Date",
-        "OBS_VALUE":    "Euribor 3M (%)"
-    })
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
-
-    return df
-
-# Exécution et affichage
+# --- affichage ---
 try:
-    df = fetch_euribor_3m_5y()
+    df = fetch_last_24()
     if df.empty:
-        st.warning("Aucune donnée disponible pour cette période.")
+        st.warning("Aucune observation renvoyée.")
     else:
-        st.subheader("Courbe journalière sur 5 ans")
         st.line_chart(df["Euribor 3M (%)"])
-        st.subheader("Tableau des valeurs")
         st.dataframe(df)
 except Exception as e:
     st.error(f"Erreur lors de la récupération : {e}")
+
+
+
 
