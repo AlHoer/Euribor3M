@@ -1,51 +1,72 @@
 import streamlit as st
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
-from datetime import date, timedelta
+import re
+from io import StringIO
+from datetime import date
+from dateutil.relativedelta import relativedelta
 
-st.set_page_config(page_title="Euribor 3M – Quotidien (scraping)", layout="centered")
-st.title("Euribor 3 mois (quotations journalières)")
-
-# Nombre de jours à afficher (entre 1 et 365)
-n = st.number_input("Nombre de derniers jours", min_value=1, max_value=365, value=30)
+st.set_page_config(page_title="Euribor 3M — 5 ans Journaliers", layout="wide")
+st.title("Historique journalier du taux Euribor 3 mois (5 ans)")
 
 @st.cache_data(ttl=3600)
-def fetch_euribor_3m_daily_scrape(last_n: int) -> pd.DataFrame:
+def fetch_euribor_3m_5y() -> pd.DataFrame:
     """
-    Scraping de la table 'By day' sur euribor-rates.eu pour récupérer
-    les last_n dernières cotations journalières du 3M Euribor.
+    Récupère les cotations journalières du 3M Euribor sur 5 ans
+    via l'API SDMX de la Bundesbank.
     """
-    url = "https://www.euribor-rates.eu/en/current-euribor-rates/2/euribor-rate-3-months/"
-    resp = requests.get(url)
+    # 1. Définir la période : aujourd'hui et -5 ans
+    today = date.today()
+    start = (today - relativedelta(years=5)).isoformat()
+    end   = today.isoformat()
+
+    # 2. Construire l'URL et les params
+    flow_ref   = "BBIG1"
+    series_key = "D.D0.EUR.MMKT.EURIBOR.M03.BID._Z"
+    url        = f"https://api.statistiken.bundesbank.de/rest/data/{flow_ref}/{series_key}"
+    params = {
+        "startPeriod": start,   # ex. '2020-06-18'
+        "endPeriod":   end,     # ex. '2025-06-18'
+        "format":      "csv"    # SDMX-CSV :contentReference[oaicite:0]{index=0}
+    }
+
+    # 3. Requête et vérif.
+    resp = requests.get(url, params=params)
     resp.raise_for_status()
 
-    # Parser le HTML et trouver la section <h2>By day</h2> puis le tableau qui suit
-    soup = BeautifulSoup(resp.text, "html.parser")
-    heading = soup.find("h2", string="By day")
-    if not heading:
-        raise ValueError("Impossible de trouver la section 'By day' sur la page.")
-    table = heading.find_next("table")
-    if not table:
-        raise ValueError("Tableau introuvable après le titre 'By day'.")
+    # 4. Nettoyage SDMX-CSV : trouver la ligne d'en-tête contenant TIME_PERIOD
+    lines = resp.text.splitlines()
+    header_idx = next(
+        (i for i, line in enumerate(lines) if "TIME_PERIOD" in line),
+        None
+    )
+    if header_idx is None:
+        raise ValueError("En-tête 'TIME_PERIOD' introuvable dans la réponse Bundesbank.")
+    data = "\n".join(lines[header_idx:])
 
-    # Lire le tableau en DataFrame
-    df = pd.read_html(str(table))[0]
-    # Normaliser les colonnes et le type date
-    df.columns = ["Date", "Euribor 3M (%)"]
-    df["Date"] = pd.to_datetime(df["Date"], dayfirst=False)  # format mm/dd/YYYY
-    df = df.set_index("Date").sort_index(ascending=False)
+    # 5. Détection du séparateur
+    sep = "," if data.count(",") > data.count(";") else ";"
 
-    # Ne garder que les last_n premiers
-    return df.head(last_n)
+    # 6. Lecture par pandas
+    df = pd.read_csv(StringIO(data), sep=sep)
+    df = df.rename(columns={
+        "TIME_PERIOD": "Date",
+        "OBS_VALUE":    "Euribor 3M (%)"
+    })
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"]).set_index("Date").sort_index()
+
+    return df
 
 # Exécution et affichage
 try:
-    df = fetch_euribor_3m_daily_scrape(n)
+    df = fetch_euribor_3m_5y()
     if df.empty:
-        st.warning("Aucune donnée disponible.")
+        st.warning("Aucune donnée disponible pour cette période.")
     else:
+        st.subheader("Courbe journalière sur 5 ans")
         st.line_chart(df["Euribor 3M (%)"])
+        st.subheader("Tableau des valeurs")
         st.dataframe(df)
 except Exception as e:
     st.error(f"Erreur lors de la récupération : {e}")
