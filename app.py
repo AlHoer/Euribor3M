@@ -1,5 +1,6 @@
 import requests
 import pandas as pd
+import re
 from io import StringIO
 from datetime import date, timedelta
 
@@ -14,23 +15,41 @@ def fetch_euribor_3m_bundesbank(start: str, end: str) -> pd.DataFrame:
     params = {
         "startPeriod": start,
         "endPeriod":   end,
-        "format":      "csv"   # renvoie du SDMX-CSV :contentReference[oaicite:0]{index=0}
+        "format":      "csv"  # SDMX-CSV
     }
     resp = requests.get(url, params=params)
     resp.raise_for_status()
 
-    # --- nettoyage SDMX-CSV ---
+    # Split en lignes et chercher l'en-tête
     lines = resp.text.splitlines()
-    # trouver l'index de la ligne d'en-tête "TIME_PERIOD"
-    header_idx = next(i for i, l in enumerate(lines) if l.startswith("TIME_PERIOD"))
-    data_lines = lines[header_idx:]
-    # détecter le séparateur (',' ou ';')
-    sep = ";" if ";" in data_lines[0] else ","
-    df = pd.read_csv(StringIO("\n".join(data_lines)), sep=sep)
+    header_idx = next(
+        (i for i, line in enumerate(lines)
+         if re.search(r'\bTIME_PERIOD\b', line)),
+        None
+    )
+    if header_idx is None:
+        raise ValueError(
+            "Impossible de trouver la ligne d'en-tête dans la réponse de l'API Bundesbank. "
+            "Contenu reçu :\n" + "\n".join(lines[:10])
+        )
 
-    # renommage et formatage
-    df = df.rename(columns={"TIME_PERIOD": "Date", "OBS_VALUE": "Euribor 3M (%)"})
-    df["Date"] = pd.to_datetime(df["Date"])
+    # Déterminer le séparateur sur la ligne d'en-tête
+    header_line = lines[header_idx]
+    sep = ',' if ',' in header_line else ';'
+
+    # Lire le CSV à partir de l'en-tête
+    df = pd.read_csv(
+        StringIO("\n".join(lines[header_idx :])),
+        sep=sep
+    )
+
+    # Renommer et parser la date
+    df = df.rename(columns={
+        "TIME_PERIOD": "Date",
+        "OBS_VALUE":    "Euribor 3M (%)"
+    })
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"])  # au cas où il y ait encore des lignes foireuses
     return df.set_index("Date")
 
 if __name__ == "__main__":
@@ -38,7 +57,11 @@ if __name__ == "__main__":
     start = (today - timedelta(days=30)).isoformat()
     end   =  today.isoformat()
 
-    df = fetch_euribor_3m_bundesbank(start, end)
-    print(df)
+    try:
+        df = fetch_euribor_3m_bundesbank(start, end)
+        print(df)
+    except Exception as e:
+        print("Erreur lors de la récupération :", e)
+
 
 
