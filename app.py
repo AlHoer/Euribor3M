@@ -1,66 +1,51 @@
 import streamlit as st
 import pandas as pd
 import requests
-import re
-from io import StringIO
-from datetime import date
+from bs4 import BeautifulSoup
+from datetime import date, timedelta
 
-st.set_page_config(page_title="Euribor 3M — Quotidien", layout="centered")
+st.set_page_config(page_title="Euribor 3M – Quotidien (scraping)", layout="centered")
 st.title("Euribor 3 mois (quotations journalières)")
 
-# Nombre d'observations à récupérer
-n = st.number_input("Nombre de jours", min_value=1, max_value=365, value=30)
+# Nombre de jours à afficher (entre 1 et 365)
+n = st.number_input("Nombre de derniers jours", min_value=1, max_value=365, value=30)
 
 @st.cache_data(ttl=3600)
-def fetch_euribor_3m_daily(last_n: int) -> pd.DataFrame:
+def fetch_euribor_3m_daily_scrape(last_n: int) -> pd.DataFrame:
     """
-    Récupère les last_n dernières cotations journalières du 3M Euribor
-    via l'API SDMX Bundesbank.
+    Scraping de la table 'By day' sur euribor-rates.eu pour récupérer
+    les last_n dernières cotations journalières du 3M Euribor.
     """
-    flow_ref   = "BBIG1"
-    series_key = "D.D0.EUR.MMKT.EURIBOR.M03.BID._Z"
-    url = (
-        f"https://api.statistiken.bundesbank.de/rest/data/"
-        f"{flow_ref}/{series_key}"
-        f"?lastNObservations={last_n}&format=csv"
-    )
+    url = "https://www.euribor-rates.eu/en/current-euribor-rates/2/euribor-rate-3-months/"
     resp = requests.get(url)
     resp.raise_for_status()
 
-    # Couper le préambule SDMX-CSV avant la ligne d'en-tête
-    lines = resp.text.splitlines()
-    header_idx = next(
-        (i for i, L in enumerate(lines) if L.startswith("TIME_PERIOD")),
-        None
-    )
-    if header_idx is None:
-        raise ValueError("Entête SDMX introuvable dans la réponse Bundesbank.")
-    sep = ";" if ";" in lines[header_idx] else ","
-    data = "\n".join(lines[header_idx:])
+    # Parser le HTML et trouver la section <h2>By day</h2> puis le tableau qui suit
+    soup = BeautifulSoup(resp.text, "html.parser")
+    heading = soup.find("h2", string="By day")
+    if not heading:
+        raise ValueError("Impossible de trouver la section 'By day' sur la page.")
+    table = heading.find_next("table")
+    if not table:
+        raise ValueError("Tableau introuvable après le titre 'By day'.")
 
-    # Chargement dans pandas
-    df = pd.read_csv(StringIO(data), sep=sep)
-    df = df.rename(columns={
-        "TIME_PERIOD": "Date",
-        "OBS_VALUE":    "Euribor 3M (%)"
-    })
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df = df.dropna(subset=["Date"]).set_index("Date")
-    return df.sort_index()
+    # Lire le tableau en DataFrame
+    df = pd.read_html(str(table))[0]
+    # Normaliser les colonnes et le type date
+    df.columns = ["Date", "Euribor 3M (%)"]
+    df["Date"] = pd.to_datetime(df["Date"], dayfirst=False)  # format mm/dd/YYYY
+    df = df.set_index("Date").sort_index(ascending=False)
+
+    # Ne garder que les last_n premiers
+    return df.head(last_n)
 
 # Exécution et affichage
 try:
-    df = fetch_euribor_3m_daily(n)
+    df = fetch_euribor_3m_daily_scrape(n)
     if df.empty:
-        st.warning("Aucune donnée renvoyée.")
+        st.warning("Aucune donnée disponible.")
     else:
         st.line_chart(df["Euribor 3M (%)"])
         st.dataframe(df)
 except Exception as e:
-    st.error(f"Erreur lors de la récupération des données : {e}")
-
-
-
-
-
-
+    st.error(f"Erreur lors de la récupération : {e}")
