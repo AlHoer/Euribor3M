@@ -3,51 +3,51 @@ import pandas as pd
 import requests
 import re
 from io import StringIO
-from datetime import date
+from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 
 st.set_page_config(page_title="Euribor 3M — 5 ans Journaliers", layout="wide")
 st.title("Historique journalier du taux Euribor 3 mois (5 ans)")
 
 @st.cache_data(ttl=3600)
-def fetch_euribor_3m_5y() -> pd.DataFrame:
+def fetch_euribor_3m_5y():
     """
     Récupère les cotations journalières du 3M Euribor sur 5 ans
-    via l'API SDMX de la Bundesbank.
+    en reculant la date de fin jusqu'à trouver des données.
     """
-    # 1. Définir la période : aujourd'hui et -5 ans
+    # 1. Définir la période de début
     today = date.today()
     start = (today - relativedelta(years=5)).isoformat()
-    end   = today.isoformat()
 
-    # 2. Construire l'URL et les params
     flow_ref   = "BBIG1"
     series_key = "D.D0.EUR.MMKT.EURIBOR.M03.BID._Z"
-    url        = f"https://api.statistiken.bundesbank.de/rest/data/{flow_ref}/{series_key}"
-    params = {
-        "startPeriod": start,   # ex. '2020-06-18'
-        "endPeriod":   end,     # ex. '2025-06-18'
-        "format":      "csv"    # SDMX-CSV :contentReference[oaicite:0]{index=0}
-    }
+    base_url   = f"https://api.statistiken.bundesbank.de/rest/data/{flow_ref}/{series_key}"
 
-    # 3. Requête et vérif.
-    resp = requests.get(url, params=params)
-    resp.raise_for_status()
+    # 2. Tenter plusieurs dates de fin (jusqu'à 7 jours en arrière)
+    resp = None
+    for offset in range(1, 8):
+        end_candidate = (today - timedelta(days=offset)).isoformat()
+        params = {
+            "startPeriod": start,
+            "endPeriod":   end_candidate,
+            "format":      "csv"
+        }
+        r = requests.get(base_url, params=params)
+        r.raise_for_status()
+        if "TIME_PERIOD" in r.text:
+            resp = r
+            break
 
-    # 4. Nettoyage SDMX-CSV : trouver la ligne d'en-tête contenant TIME_PERIOD
+    if resp is None:
+        raise RuntimeError("Aucune donnée trouvée sur les 7 derniers jours pour définir la date de fin.")
+
+    # 3. Nettoyer le préambule SDMX-CSV
     lines = resp.text.splitlines()
-    header_idx = next(
-        (i for i, line in enumerate(lines) if "TIME_PERIOD" in line),
-        None
-    )
-    if header_idx is None:
-        raise ValueError("En-tête 'TIME_PERIOD' introuvable dans la réponse Bundesbank.")
+    header_idx = next(i for i, L in enumerate(lines) if "TIME_PERIOD" in L)
     data = "\n".join(lines[header_idx:])
 
-    # 5. Détection du séparateur
+    # 4. Détecter le séparateur et charger dans pandas
     sep = "," if data.count(",") > data.count(";") else ";"
-
-    # 6. Lecture par pandas
     df = pd.read_csv(StringIO(data), sep=sep)
     df = df.rename(columns={
         "TIME_PERIOD": "Date",
@@ -70,3 +70,4 @@ try:
         st.dataframe(df)
 except Exception as e:
     st.error(f"Erreur lors de la récupération : {e}")
+
